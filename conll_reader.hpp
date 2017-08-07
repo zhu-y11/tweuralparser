@@ -83,99 +83,91 @@ inline unsigned int UTF8Len(unsigned char x)
 // TODO: READ NECESSARY THINGS HERE
 Sentence parse_input_line(std::string line, DictMap& dict_map, bool use_brown)
 {
-    std::istringstream in(line);
-    std::string sep = "|||";
-    std::string temp;
+  std::istringstream in(line);
+  std::string sep = "|||";
+  std::string temp;
   
-    Sentence sent;
-
-    /* 
-        the input looks like:
-        <ROOT>/<ROOT> word1/pos1 word2/pos2 word3/pos3 word4/pos4 word5/pos5 ||| action1 action2/label action3/label action4
-    */
-    // get the part before |||
-    while(1)
+  Sentence sent;
+  
+  /*
+    the input looks like:
+    <ROOT>/<ROOT> word1/pos1/br4/br6/brall word2/pos2/br4/br6/brall ... ||| SHIFT action2/label action3/label ...
+  */
+  // get the part before |||
+  while(1)
+  {
+    // word/poss
+    in >> temp;
+    if (temp == sep)
     {
-        // word/poss
-        in >> temp;
-        if (temp == sep) break;
-        std::string word, pos, br4, br6, brall;
-        if(use_brown)
-        {
-            std::vector <std::string> fields(5);
-            for(int i = 4; i >= 1; i--)
-            {
-                size_t p = temp.rfind('/');
-                //std::cout << temp << std::endl;
-                if (p == std::string::npos || p == 0 || p == (word.size()-1))
-                {
-                    std::cerr << "mal-formed POS tags: " << temp << std::endl;
-                    std::cerr << p << std::endl;
-                    abort();
-                }
-                fields[i] = temp.substr(p + 1);
-                temp = temp.substr(0, p);
-                if(i == 1)
-                {
-                    fields[0] = temp;
-                }
-            }
-            word = fields[0];
-            pos = fields[1];
-            br4 = fields[2];
-            br6 = fields[3];
-            brall = fields[4];
-            sent.br_4.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BR4).convert(br4));
-            sent.br_6.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BR6).convert(br6));
-            sent.br_all.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BRALL).convert(brall));
-        }
-        else
-        {
-            size_t p = temp.rfind('/');
-            if (p == std::string::npos || p == 0 || p == (word.size()-1))
-            {
-                std::cerr << "mal-formed POS tags: " << temp << std::endl;
-                std::cerr << p << std::endl;
-                abort();
-            }
-            word = temp.substr(0, p);
-            pos = temp.substr(p+1);
-            //std::cout << word << ' ' << pos << std::endl;
-        }
-        sent.raw_terms.push_back(word);
-        sent.terms.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_TERM).convert(word));
-        sent.poss.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_POS).convert(pos));
-
-        // break the word into characters and prepare the character settings
-        size_t cur = 0;
-        std::vector<int> word_chars;
-        while(cur < word.size())
-        {
-            size_t len = UTF8Len(word[cur]);
-            word_chars.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_CHARCTER).convert(word.substr(cur,len)));
-            cur += len;
-        }
-        sent.chars.push_back(word_chars);
-
-        // lowercase the word
-        std::string word_lc(word);
-        boost::algorithm::to_lower(word_lc);
-        sent.raw_lower_cased_terms.push_back(word_lc);
-        sent.lower_cased_terms.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_LC_TERM).convert(word_lc));
+      break;
     }
-
-    // get the part after |||
-    while(1)
+    
+    std::string word, pos, br4, br6, brall;
+    std::vector <std::string> fields(5);
+    for(int i = 4; i >= 1; i--)
     {
-        // read the labels
-        in >> temp;
-        if (!in) break;
-        std::string action(temp);
-        // gold standard
-        // action1 action2/label
-        sent.ref_actions.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_ACTION).convert(action));
+      size_t p = temp.rfind('/');
+      //std::cout << temp << std::endl;
+      if (p == std::string::npos || p == 0 || p == (word.size()-1))
+      {
+        std::cerr << "mal-formed POS tags: " << temp << std::endl;
+        std::cerr << p << std::endl;
+        abort();
+      }
+      fields[i] = temp.substr(p + 1);
+      temp = temp.substr(0, p);
+      if(i == 1)
+      {
+        fields[0] = temp;
+      }
     }
-    return sent;
+    word = fields[0];
+    pos = fields[1];
+    br4 = fields[2];
+    br6 = fields[3];
+    brall = fields[4];
+    
+    if(use_brown)
+    {
+      sent.br_4.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BR4).convert(br4));
+      sent.br_6.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BR6).convert(br6));
+      sent.br_all.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_BRALL).convert(brall));
+    }
+    sent.raw_terms.push_back(word);
+    sent.terms.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_TERM).convert(word));
+    sent.poss.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_POS).convert(pos));
+
+    // break the word into characters and prepare the character settings
+    size_t cur = 0;
+    std::vector<int> word_chars;
+    while(cur < word.size())
+    {
+      size_t len = UTF8Len(word[cur]);
+      word_chars.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_CHARCTER).convert(word.substr(cur,len)));
+      cur += len;
+    }
+    sent.chars.push_back(word_chars);
+
+    // lowercase the word
+    std::string word_lc(word);
+    boost::algorithm::to_lower(word_lc);
+    sent.raw_lower_cased_terms.push_back(word_lc);
+    sent.lower_cased_terms.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_LC_TERM).convert(word_lc));
+  }
+
+  // get the part after |||
+  while(1)
+  {
+    // read the labels
+    in >> temp;
+    if (!in) break;
+    std::string action(temp);
+    // gold standard
+    // action1 action2/label
+    sent.ref_actions.push_back(dict_map.get_dict(DictMap::DICTMAP_IND_ACTION).convert(action));
+  }
+  return sent;
 }
 
 
@@ -196,60 +188,6 @@ std::vector<Sentence> read_from_file(std::string file_path, DictMap& dict_map, b
         corpus.push_back(s);
     }
     return corpus;
-}
-
-
-void load_char_set(std::string char_set_filepath, DictMap& dict_map)
-{
-    std::ifstream infile(char_set_filepath);
-    assert(infile);
-    std::string line;
-    while(std::getline(infile, line))
-    {
-        boost::algorithm::trim(line);
-        if (line.length() == 0)
-        {
-            break;
-        }
-        dict_map.get_dict(DictMap::DICTMAP_IND_CHARCTER).convert(line);
-    }
-    dict_map.get_dict(DictMap::DICTMAP_IND_CHARCTER).freeze();
-    dict_map.get_dict(DictMap::DICTMAP_IND_CHARCTER).set_unk("<UNK>");
-}
-
-
-void load_pos_set(std::string pos_set_filepath, DictMap& dict_map)
-{
-    std::ifstream infile(pos_set_filepath);
-    assert(infile);
-    std::string line;
-    while(std::getline(infile, line))
-    {
-        boost::algorithm::trim(line);
-        if (line.length() == 0)
-        {
-            break;
-        }
-        dict_map.get_dict(DictMap::DICTMAP_IND_POS).convert(line);
-    }
-    dict_map.get_dict(DictMap::DICTMAP_IND_POS).freeze();
-}
-
-void load_action_set(std::string action_set_filepath, DictMap& dict_map)
-{
-    std::ifstream infile(action_set_filepath);
-    assert(infile);
-    std::string line;
-    while(std::getline(infile, line))
-    {
-        boost::algorithm::trim(line);
-        if (line.length() == 0)
-        {
-            break;
-        }
-        dict_map.get_dict(DictMap::DICTMAP_IND_ACTION).convert(line);
-    }
-    dict_map.get_dict(DictMap::DICTMAP_IND_ACTION).freeze();
 }
 
 #endif

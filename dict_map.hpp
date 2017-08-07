@@ -25,6 +25,7 @@ class DictMap
         static const int DICTMAP_IND_BR6 = 6;
         // BR all dictionary
         static const int DICTMAP_IND_BRALL = 7;
+
         // How many dict we have
         static const int DICTMAP_INDSIZE = 8;
   
@@ -44,7 +45,6 @@ class DictMap
     {
         for(int i = 0; i < DICTMAP_INDSIZE; i++)
         {
-            if(get_dict(i).is_frozen()) continue;
             get_dict(i).freeze();
             get_dict(i).set_unk("<UNK>");
         }

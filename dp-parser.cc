@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <unordered_map>
 
+#include <time.h>
 #include <execinfo.h>
 #include <unistd.h>
 #include <signal.h>
@@ -25,8 +26,6 @@
 #include "dynet/dict.h"
 #include "dynet/cfsm-builder.h"
 #include "dynet/timing.h"
-#include "dynet/globals.h"
-
 
 #include "conll_reader.hpp"
 #include "dict_map.hpp"
@@ -52,13 +51,11 @@ struct ModelVars
         unsigned REL_DIM;
         bool USE_BROWN;
         bool SAVE_MODEL;
+        bool PTB_TRAIN;
 
         string pretrained_embedding_filepath;
-        string model_filepath;
-        string pretrained_model;
-        string char_set_filepath;
-        string pos_set_filepath;
-        string action_set_filepath;
+        string output_filepath;
+        string pretrained_model_filepath;
 
         string to_string()
         {
@@ -74,14 +71,12 @@ struct ModelVars
             << "POS_DIM: " << POS_DIM << "\n"
             << "REL_DIM: " << REL_DIM << "\n"
             << "pretrained_embedding_filepath: " << pretrained_embedding_filepath << "\n"
-            << "model_filepath: " << model_filepath << "\n"
-            << "pretrained_model_filepath: " << pretrained_model << "\n"
+            << "output_filepath: " << output_filepath << "\n"
+            << "pretrained_model_filepath: " << pretrained_model_filepath << "\n"
             << "USE_POS: " << USE_POS << "\n"
             << "USE_BROWN: " << USE_BROWN << "\n"
             << "SAVE_MODEL: " << SAVE_MODEL << "\n"
-            << "char_set_filepath: " << char_set_filepath << "\n"
-            << "pos_set_filepath: " << pos_set_filepath << "\n"
-            << "action_set_filepath: " << action_set_filepath << "\n";
+            << "PTB_TRAIN: " << PTB_TRAIN << "\n";
             return os.str();
         }
 
@@ -105,6 +100,7 @@ struct ModelVars
         {
             return (correct/total);
         }
+    
     
     private:
         float correct = 0.0;
@@ -359,7 +355,7 @@ class ParserState
 
 struct ParserBuilder
 {
-    explicit ParserBuilder(Model& model, Model& ns_model, ModelVars* mv, DictMap* dict_map):
+    explicit ParserBuilder(Model& model, Model& ns_model, ModelVars* mv, DictMap* dict_map) :
     mv_(mv),
     dict_map_(dict_map),
     // Parameter for the LSTMs
@@ -381,7 +377,7 @@ struct ParserBuilder
     
     // Parameter for word, pretrained, and char
     // word embeddings
-    //p_w(model.add_lookup_parameters(dict_map_->vocab_size(), {mv_->WORD_INPUT_DIM})),
+    p_w(model.add_lookup_parameters(dict_map_->vocab_size(), {mv_->WORD_INPUT_DIM})),
     // the root representation in char lstm
     p_root_in_char(model.add_parameters({mv_->LSTM_CHAR_OUTPUT_DIM})),
     // lookup for chars
@@ -390,7 +386,7 @@ struct ParserBuilder
     p_t(ns_model.add_lookup_parameters(dict_map_->lc_vocab_size(), {mv_->PRETRAINED_DIM})),
     
     // Parameter for the concatenation of input, char_fwd, char_bwd, word, pos, pretrain
-    p_x2i(model.add_parameters({mv_->LSTM_INPUT_DIM, (2 * mv_->LSTM_CHAR_OUTPUT_DIM + mv_->POS_DIM + mv_->PRETRAINED_DIM)})),
+    p_x2i(model.add_parameters({mv_->LSTM_INPUT_DIM, (2 * mv_->LSTM_CHAR_OUTPUT_DIM + mv_->WORD_INPUT_DIM + 4 * mv_->POS_DIM + mv_->PRETRAINED_DIM)})),
     p_x2ib(model.add_parameters({mv_->LSTM_INPUT_DIM})),
     
     // Parameter for action and relation lookup
@@ -427,6 +423,12 @@ struct ParserBuilder
         {
             p_p = model.add_lookup_parameters(dict_map_->pos_size(), {mv_->POS_DIM});
         }
+        
+        /*
+        // predict the final action
+        p_p2a = ns_model.add_parameters({dict_map_->action_size(), mv_->HIDDEN_DIM});
+        p_abias = ns_model.add_parameters({dict_map_->action_size()});
+        */
         
         // Set up pretrained embedding
         // ??? if no pretrained embeddings(do nothing), p_t would be empty??
@@ -526,11 +528,11 @@ struct ParserBuilder
             }
       
             // search for word embeddings of word i
-            //w = lookup(cg, p_w, sent.terms[i]);
+            w = lookup(cg, p_w, sent.terms[i]);
 
             input_comps.push_back(w_c_f);
             input_comps.push_back(w_c_b);
-            //input_comps.push_back(w);
+            input_comps.push_back(w);
 
             Expression pos;
             if (mv_->USE_POS)
@@ -546,7 +548,6 @@ struct ParserBuilder
 
             // Add brown clusters
             Expression br4, br6, brall; // look up of the brown clusters
-            /*
             if(mv_->USE_BROWN)
             {
                 br4 = lookup(cg, p_br4, sent.br_4[i]);
@@ -562,8 +563,6 @@ struct ParserBuilder
             input_comps.push_back(br4);
             input_comps.push_back(br6);
             input_comps.push_back(brall);
-             */
-
       
             // Add the pretrained embedding to the input representation
             Expression pretrain_emb = const_lookup(cg, p_t, sent.lower_cased_terms[i]);
@@ -717,45 +716,45 @@ namespace po = boost::program_options;
 
 void InitCommandLine(int argc, char** argv, po::variables_map* conf)
 {
-    po::options_description opts("Configuration options");
-    opts.add_options()
-        ("training_data", po::value<string>(), "Training corpus")
-        ("dev_data", po::value<string>(), "Development corpus")
-        ("test_data", po::value<string>(), "Test corpus")
-        ("files", po::value<vector<string>>()->multitoken(), "File names to be read")
-        ("model", po::value<string>()->default_value(""), "Load saved model from this file")
-        ("step_size", po::value<double>()->default_value(5e-4), "Step size for adam trainer")
-        ("report_every_i", po::value<unsigned>()->default_value(1), "input embedding size")
-        ("use_pos_tags", "make POS tags visible to parser")
-        ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
-        ("word_input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
-        ("char_input_dim", po::value<unsigned>()->default_value(10), "char input size")
-        ("lstm_char_output_dim", po::value<unsigned>()->default_value(32), "the embedding size contributed from char-lstm")
-        ("hidden_dim", po::value<unsigned>()->default_value(100), "hidden dimension")
-        ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
-        ("pretrained_dim", po::value<unsigned>()->default_value(100), "pretrained input dimension")
-        ("lstm_input_dim", po::value<unsigned>()->default_value(50), "the input dimension to LSTMs (stack, buffer, action)")
-        ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
-        ("rel_dim", po::value<unsigned>()->default_value(16), "relation dimension")
-        ("pretrained_embedding_filepath", po::value<string>()->default_value(""), "Pretrained word embeddings")
-        ("script_filepath", po::value<string>()->default_value(""), "eval script filepath")
-        ("use_brown_clusters", "make brown clusters visible to parser")
-        ("pretrained_model", po::value<string>()->default_value(""), "pretrained model to be loaded")
-        ("save_model", "save model or not")
-        ("fold", po::value<unsigned>(),"fold number")
-        ("char_set_filepath", po::value<string>()->default_value(""), "char set filepath")
-        ("pos_set_filepath", po::value<string>()->default_value(""), "pos set filepath")
-        ("action_set_filepath", po::value<string>()->default_value(""), "action set filepath")
-        ("help,h",  "Help");
+  po::options_description opts("Configuration options");
+  opts.add_options()
+  ("training_data", po::value<string>(), "Training corpus")
+  ("dev_data", po::value<string>(), "Development corpus")
+  ("test_data", po::value<string>(), "Test corpus")
+  ("ptb_data", po::value<string>()->default_value(""), "PTB corpus")
+  
+  ("output_filepath", po::value<string>()->default_value(""), "output filepath")
+  ("pretrained_embedding_filepath", po::value<string>()->default_value(""), "Pretrained word embeddings")
+  ("script_filepath", po::value<string>()->default_value(""), "eval script filepath")
+  ("pretrained_model_filepath", po::value<string>()->default_value(""), "pretrained model to be loaded")
+  
+  ("save_model", "save model or not")
+  ("step_size", po::value<double>()->default_value(5e-4), "Step size for adam trainer")
+  ("report_every_i", po::value<unsigned>()->default_value(1), "Report results after i iterations")
+  ("use_pos_tags", "make POS tags visible to parser")
+  ("use_brown_clusters", "make brown clusters visible to parser")
+  ("ptb_train", "whether ptb is used for pretraining")
 
-    po::options_description dcmdline_options;
-    dcmdline_options.add(opts);
-    po::store(parse_command_line(argc, argv, dcmdline_options), *conf);
-    if (conf->count("help"))
-    {
-        cerr << dcmdline_options << endl;
-        exit(1);
-    }
+  ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
+  ("char_input_dim", po::value<unsigned>()->default_value(10), "char input size")
+  ("lstm_char_output_dim", po::value<unsigned>()->default_value(32), "the embedding size contributed from char-lstm")
+  ("word_input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
+  ("pretrained_dim", po::value<unsigned>()->default_value(100), "pretrained input dimension")
+  ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
+  ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
+  ("rel_dim", po::value<unsigned>()->default_value(16), "relation dimension")
+  ("lstm_input_dim", po::value<unsigned>()->default_value(50), "the input dimension to LSTMs (stack, buffer, action)")
+  ("hidden_dim", po::value<unsigned>()->default_value(100), "hidden dimension")
+  ("help,h",  "Help");
+
+  po::options_description dcmdline_options;
+  dcmdline_options.add(opts);
+  po::store(parse_command_line(argc, argv, dcmdline_options), *conf);
+  if (conf->count("help"))
+  {
+    cerr << dcmdline_options << endl;
+    exit(1);
+  }
 }
 
 float eval_parses(string gold_file_path, string sys_file_path, string script_filepath)
@@ -830,191 +829,177 @@ void predict(ParserBuilder& parser_builder, vector<Sentence> corpus, string outp
 
 int main(int argc, char** argv)
 {
-    dynet::initialize(argc, argv);
+  dynet::initialize(argc, argv);
 
-    po::variables_map conf;
-    InitCommandLine(argc, argv, &conf);
+  po::variables_map conf;
+  InitCommandLine(argc, argv, &conf);
 
-    // Initialize the contextLSTM_INPUT_DIM}
-    DictMap dict_map;
-    ModelVars mv;
+  // Initialize the contextLSTM_INPUT_DIM}
+  DictMap dict_map;
+  ModelVars mv;
 
-    mv.LAYERS = conf["layers"].as<unsigned>();
-    mv.WORD_INPUT_DIM = conf["word_input_dim"].as<unsigned>();
-    mv.CHAR_INPUT_DIM = conf["char_input_dim"].as<unsigned>();
-    mv.LSTM_CHAR_OUTPUT_DIM = conf["lstm_char_output_dim"].as<unsigned>();
-    mv.HIDDEN_DIM = conf["hidden_dim"].as<unsigned>();
-    mv.ACTION_DIM = conf["action_dim"].as<unsigned>();
-    mv.PRETRAINED_DIM = conf["pretrained_dim"].as<unsigned>();
-    mv.LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
-    mv.POS_DIM = conf["pos_dim"].as<unsigned>();
-    mv.REL_DIM = conf["rel_dim"].as<unsigned>();
-    mv.pretrained_embedding_filepath = conf["pretrained_embedding_filepath"].as<string>();
-    mv.model_filepath = conf["model"].as<string>();
-    mv.USE_POS = conf.count("use_pos_tags");
-    mv.USE_BROWN = conf.count("use_brown_clusters");
-    mv.pretrained_model = conf["pretrained_model"].as<string>();
-    mv.SAVE_MODEL = conf.count("save_model");
-    int cross = conf.count("fold");
-    mv.char_set_filepath = conf["char_set_filepath"].as<string>();
-    mv.pos_set_filepath = conf["pos_set_filepath"].as<string>();
-    mv.action_set_filepath = conf["action_set_filepath"].as<string>();
+  mv.LAYERS = conf["layers"].as<unsigned>();
+  mv.WORD_INPUT_DIM = conf["word_input_dim"].as<unsigned>();
+  mv.CHAR_INPUT_DIM = conf["char_input_dim"].as<unsigned>();
+  mv.LSTM_CHAR_OUTPUT_DIM = conf["lstm_char_output_dim"].as<unsigned>();
+  mv.HIDDEN_DIM = conf["hidden_dim"].as<unsigned>();
+  mv.ACTION_DIM = conf["action_dim"].as<unsigned>();
+  mv.PRETRAINED_DIM = conf["pretrained_dim"].as<unsigned>();
+  mv.LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
+  mv.POS_DIM = conf["pos_dim"].as<unsigned>();
+  mv.REL_DIM = conf["rel_dim"].as<unsigned>();
+  mv.pretrained_embedding_filepath = conf["pretrained_embedding_filepath"].as<string>();
+  mv.output_filepath = conf["output_filepath"].as<string>();
+  mv.USE_POS = conf.count("use_pos_tags");
+  mv.USE_BROWN = conf.count("use_brown_clusters");
+  mv.SAVE_MODEL = conf.count("save_model");
+  mv.pretrained_model_filepath = conf["pretrained_model_filepath"].as<string>();
+  mv.PTB_TRAIN = conf.count("ptb_train");
 
-    
-    int it, best_iteration;
-    int idx;
-    if(cross)
-    {
-        //cross
-        best_iteration = it = 0;
-        idx = conf["fold"].as<unsigned>();
-    }
+  // Log the model hyper parameters.
+  cerr << mv.to_string() << endl;
 
-    // Log the model hyper parameters.
-    cerr << mv.to_string() << endl;
-    cerr << "FOLD COUNT: " << cross << endl;
-    cerr << "Eval Script Filepath: " << conf["script_filepath"].as<string>() <<endl;
-    
-    load_char_set(mv.char_set_filepath, dict_map);
-    cerr << "Char Set: " << dict_map.char_size() << endl;
-    load_pos_set(mv.pos_set_filepath, dict_map);
-    cerr << "POS Set: " << dict_map.pos_size() << endl;
-    load_action_set(mv.action_set_filepath, dict_map);
-    cerr << "Action Set: " << dict_map.action_size() << endl;
-    
-    vector<Sentence> corpus_train = read_from_file(conf["training_data"].as<string>(), dict_map, false),
-    corpus_dev = read_from_file(conf["dev_data"].as<string>(), dict_map, false),
-    corpus_test = read_from_file(conf["test_data"].as<string>(), dict_map, false);
-    
-    dict_map.freeze();
-    cerr << "Training: " << corpus_train.size() << " sentences from " << conf["training_data"].as<string>() << endl;
-    cerr << "Dev: " << corpus_dev.size() << " sentences from " << conf["dev_data"].as<string>() << endl;
-    cerr << "Test: " << corpus_test.size() << " sentences from " << conf["test_data"].as<string>() << endl;
-    
-    // Log the dict map status
-    //cerr << dict_map.to_string() << endl;
-    Model model, nonsave_model;
-    ParserBuilder parser_builder(model, nonsave_model, &mv, &dict_map);
-    
-    for(auto& para: model.lookup_parameters_list())
-    {
-        cerr << para->all_dim << endl;
-    }
-    cerr << "#Look up Parameter: " << model.lookup_parameters_list().size() << endl;
-    for(auto& para: model.parameters_list())
-    {
-        cerr << para->dim << endl;
-    }
-    cerr << "#Parameter: " << model.parameters_list().size() << endl;
-    
-    //parser_builder.init(model);
-    if(mv.pretrained_model != "")
-    {
-        dynet::load_dynet_model(mv.pretrained_model, &model);
-    }
-    
-    for(auto& para: model.lookup_parameters_list())
-    {
-        cerr << para->all_dim << endl;
-    }
-    cerr << "#Look up Parameter after loading model: " << model.lookup_parameters_list().size() << endl;
-    for(auto& para: model.parameters_list())
-    {
-        cerr << para->dim << endl;
-    }
-    cerr << "#Parameter after loading model: " << model.parameters_list().size() << endl;
-    
-    //auto sgd = new AdamTrainer(&model, 1e-6, conf["step_size"].as<double>(), 0.01, 0.9999, 1e-8);
-    //auto sgd = new AdamTrainer(&model, 1e-6, 0.01, 0.9999, 1e-8);
-
-    auto sgd = new MomentumSGDTrainer(model, 0.01, 0.9, 0.1);
+  cerr << "Eval Script Filepath: " << conf["script_filepath"].as<string>() <<endl;
   
-    //training corpus sentence number
-    unsigned si = 0;
-    vector<unsigned> order(corpus_train.size());
-    for (int i = 0; i < static_cast<int>(order.size()); ++i)
-    {
-        order[i] = i;
-    }
-    
-    int report = 0;
-    int epoch_num = 0;
-    const int EPOCH_LIMIT = 100;
+  vector<Sentence> corpus_train, corpus_dev, corpus_test, corpus_temp;
+  
+  if(mv.PTB_TRAIN)
+  {
+    corpus_temp = read_from_file(conf["training_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_dev = read_from_file(conf["dev_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_test = read_from_file(conf["test_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_train = read_from_file(conf["ptb_data"].as<string>(), dict_map, mv.USE_BROWN);
+  }
+  else
+  {
+    corpus_train = read_from_file(conf["training_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_dev = read_from_file(conf["dev_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_test = read_from_file(conf["test_data"].as<string>(), dict_map, mv.USE_BROWN);
+    corpus_temp = read_from_file(conf["ptb_data"].as<string>(), dict_map, mv.USE_BROWN);
+  }
+  cerr << "Reading " << corpus_train.size() << " sentences" << endl;
+  cerr << "Reading " << corpus_dev.size() << " sentences" << endl;
+  cerr << "Reading " << corpus_test.size() << " sentences" << endl;
+  cerr << "Reading " << corpus_temp.size() << " sentences" << endl;
 
-    float current_best_dev = 0.0;
-    float current_best_test = 0.0;
+  
+  // Log the dict map status
+  Model model, nonsave_model;
+  ParserBuilder parser_builder(model, nonsave_model, &mv, &dict_map);
+  for(auto& para: model.lookup_parameters_list())
+  {
+      cerr << para->all_dim << endl;
+  }
+  cerr << "#Look up Parameter: " << model.lookup_parameters_list().size() << endl;
     
-    while(1)
-    {
-        Timer iteration("completed in");
-        double loss = 0.0;
-        //epoch
-        for (int i = 0; i < 100; ++i)
-        {
-            if (si == corpus_train.size())
-            {
-                si = 0;
-                sgd->update_epoch();
-                epoch_num ++;
-                if(mv.SAVE_MODEL)
-                {
-                    string filename = "model_epoch_" + boost::lexical_cast<string>(epoch_num);
-                    dynet::save_dynet_model(filename, &model);
-                }
-                if(epoch_num == EPOCH_LIMIT)
-                {
-                    return 0;
-                }
-                //cerr << "**SHUFFLE\n";
-                shuffle(order.begin(), order.end(), *rndeng);
-            }
-            // construct graph
-            ComputationGraph cg;
-            auto& sent = corpus_train[order[si]];
-            ++si;
-            vector<unsigned int> results;
-            Expression loss_expr = parser_builder.log_prob_parser(cg, sent, true, results);
-            loss += as_scalar(cg.forward(loss_expr));
-            cg.backward(loss_expr);
-            sgd->update(1.0);
-        }
-        sgd->status();
-        cerr << "acc = " << mv.current_acc() << endl;
-        mv.counter_clean();
-        report++;
-        if (report % (conf["report_every_i"].as<unsigned>()) == 0)
-        {
-            it ++;
-            // Begin the training loop
-            string dev_output = mv.model_filepath + ".dev.pred";
-            string test_output = mv.model_filepath + ".test.pred";
-            cerr << "DEBUG Path:"<<dev_output <<endl;
-            // For simplicity, we just reuse the parser builder here, but it should be totally okay when you
-            // save mv, model and dictmap and rebuild the parser builder
-            predict(parser_builder, corpus_dev, dev_output);
-            float dev_score = eval_parses(conf["dev_data"].as<string>(), dev_output, conf["script_filepath"].as<string>());
-            cerr << "score dev: " << dev_score << endl;
-            predict(parser_builder, corpus_test, test_output);
-            float test_score = eval_parses(conf["test_data"].as<string>(), test_output, conf["script_filepath"].as<string>());
-            cerr << "score test: " << test_score  << endl;
-            // only compare dev score
-            if (dev_score > current_best_dev)
-            {
-                current_best_dev = dev_score;
-                current_best_test = test_score;
-                //cross
-                best_iteration = it;
-            }
-            cerr << "current best dev: " << current_best_dev << " current best test: " << current_best_test << endl;
-            //cross
-            cout << "best iteration: " << best_iteration << " in fold " << idx << endl;
-            
-            if(it == 35)
-            {
-                string filename = "model_final";
+  parser_builder.init(model);
+  if(mv.pretrained_model_filepath != "")
+  {
+      dynet::load_dynet_model(mv.pretrained_model_filepath, &model);
+  }
+    
+  for(auto& para: model.lookup_parameters_list())
+  {
+      cerr << para->all_dim << endl;
+  }
+  cerr << "#Look up Parameter after loading model: " << model.lookup_parameters_list().size() << endl;
+        
+  //auto sgd = new AdamTrainer(&model, 1e-6, conf["step_size"].as<double>(), 0.01, 0.9999, 1e-8);
+  //auto sgd = new AdamTrainer(&model, 1e-6, 0.01, 0.9999, 1e-8);
+  auto sgd = new MomentumSGDTrainer(model, 0.01, 0.9, 0.1);
+  
+  //training corpus sentence number
+  unsigned si = 0;
+  vector<unsigned> order(corpus_train.size());
+  for (int i = 0; i < static_cast<int>(order.size()); ++i)
+  {
+      order[i] = i;
+  }
+    
+  int report = 0;
+  int epoch_num = 0;
+  const int EPOCH_LIMIT = 15;
+
+  float current_best_dev = 0.0;
+  float current_best_test = 0.0;
+    
+  while(1)
+  {
+      Timer iteration("completed in");
+      double loss = 0.0;
+      //epoch
+      for (int i = 0; i < 100; ++i)
+      {
+          if (si == corpus_train.size())
+          {
+              si = 0;
+              sgd->update_epoch();
+              epoch_num ++;
+              if(mv.SAVE_MODEL)
+              {
+                string filename = "model_epoch_" + boost::lexical_cast<string>(epoch_num);
                 dynet::save_dynet_model(filename, &model);
+              }
+              if(epoch_num == EPOCH_LIMIT)
+              {
                 return 0;
-            } 
+              }
+              //cerr << "**SHUFFLE\n";
+              shuffle(order.begin(), order.end(), *rndeng);
+          }
+          // construct graph
+          ComputationGraph cg;
+          auto& sent = corpus_train[order[si]];
+          ++si;
+          vector<unsigned int> results;
+          Expression loss_expr = parser_builder.log_prob_parser(cg, sent, true, results);
+          loss += as_scalar(cg.forward(loss_expr));
+          cg.backward(loss_expr);
+          sgd->update(1.0);
+      }
+      sgd->status();
+      cerr << "acc = " << mv.current_acc() << endl;
+      mv.counter_clean();
+      report++;
+      if (report % (conf["report_every_i"].as<unsigned>()) == 0)
+      {
+        // Begin the training loop
+        clock_t t_start = clock();
+        string dev_output = mv.output_filepath + ".dev.pred";
+        string test_output = mv.output_filepath + ".test.pred";
+        cerr << "DEBUG Path:"<<dev_output <<endl;
+        // For simplicity, we just reuse the parser builder here, but it should be totally okay when you
+        // save mv, model and dictmap and rebuild the parser builder
+        predict(parser_builder, corpus_dev, dev_output);
+        float dev_score = eval_parses(conf["dev_data"].as<string>(), dev_output, conf["script_filepath"].as<string>());
+        cerr << "score dev: " << dev_score << endl;
+        predict(parser_builder, corpus_test, test_output);
+        float test_score = eval_parses(conf["test_data"].as<string>(), test_output, conf["script_filepath"].as<string>());
+        cerr << "score test: " << test_score  << endl;
+        // only compare dev score
+        if (dev_score > current_best_dev)
+        {
+          current_best_dev = dev_score;
+          current_best_test = test_score;
+            
+          /*
+          string dev_best = "dev_best", test_best = "test_best";
+
+          ifstream findev(dev_output + "_conv"), fintest(test_output + "_conv");
+          ofstream foutdev(dev_best), fouttest(test_best);
+          string line;
+          while(getline(findev, line))
+          {
+            foutdev << line << endl;;
+          }
+          while(getline(fintest, line))
+          {
+            fouttest << line << endl;
+          }
+          */
         }
-    }
+        cerr << "current best dev: " << current_best_dev << " current best test: " << current_best_test << endl;
+        cout << "Elapsed time: " << (double)(clock() - t_start)/CLOCKS_PER_SEC << " sec" << endl;
+      }
+  }
 }
